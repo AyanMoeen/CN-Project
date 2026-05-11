@@ -1,0 +1,23 @@
+package com.ayan.instantmessenger
+
+import android.content.Context
+
+object KeyStorageHelper {
+
+    private const val PREF_NAME = "encryption_keys"
+    private const val KEY_PRIVATE = "private_key"
+
+    fun savePrivateKey(context: Context, privateKey: String) {
+        val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putString(KEY_PRIVATE, privateKey).apply()
+    }
+
+    fun getPrivateKey(context: Context): String? {
+        val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        return prefs.getString(KEY_PRIVATE, null)
+    }
+
+    fun hasPrivateKey(context: Context): Boolean {
+        return getPrivateKey(context) != null
+    }
+}

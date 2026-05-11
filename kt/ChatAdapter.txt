@@ -1,0 +1,78 @@
+package com.ayan.instantmessenger
+
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.widget.TextView
+import androidx.recyclerview.widget.RecyclerView
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Date
+import java.util.Locale
+
+class ChatAdapter(
+    private val chatList: MutableList<Chat>,
+    private val onChatClick: (Chat) -> Unit
+) : RecyclerView.Adapter<ChatAdapter.ChatViewHolder>() {
+
+    class ChatViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
+        val tvInitial: TextView = itemView.findViewById(R.id.tvChatInitial)
+        val tvName: TextView = itemView.findViewById(R.id.tvChatName)
+        val tvLastMessage: TextView = itemView.findViewById(R.id.tvLastMessage)
+        val tvTime: TextView = itemView.findViewById(R.id.tvLastMessageTime)
+        val tvUnread: TextView = itemView.findViewById(R.id.tvUnreadCount)
+    }
+
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ChatViewHolder {
+        val view = LayoutInflater.from(parent.context)
+            .inflate(R.layout.item_chat, parent, false)
+        return ChatViewHolder(view)
+    }
+
+    override fun onBindViewHolder(holder: ChatViewHolder, position: Int) {
+        val chat = chatList[position]
+
+        holder.tvName.text = chat.otherUserName
+        holder.tvLastMessage.text = chat.lastMessage
+        holder.tvInitial.text = chat.otherUserName.firstOrNull()
+            ?.uppercaseChar()?.toString() ?: "?"
+
+        if (chat.lastMessageTime > 0) {
+            holder.tvTime.text = getFormattedTime(chat.lastMessageTime)
+        }
+
+        if (chat.unreadCount > 0) {
+            holder.tvUnread.visibility = View.VISIBLE
+            holder.tvUnread.text = chat.unreadCount.toString()
+        } else {
+            holder.tvUnread.visibility = View.GONE
+        }
+
+        holder.itemView.setOnClickListener { onChatClick(chat) }
+    }
+
+    private fun getFormattedTime(timestamp: Long): String {
+        val messageDate = Calendar.getInstance().apply { timeInMillis = timestamp }
+        val today = Calendar.getInstance()
+        val yesterday = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, -1) }
+
+        return when {
+            isSameDay(messageDate, today) -> {
+                SimpleDateFormat("hh:mm a", Locale.getDefault()).format(Date(timestamp))
+            }
+            isSameDay(messageDate, yesterday) -> {
+                "Yesterday"
+            }
+            else -> {
+                SimpleDateFormat("dd/MM/yyyy", Locale.getDefault()).format(Date(timestamp))
+            }
+        }
+    }
+
+    private fun isSameDay(cal1: Calendar, cal2: Calendar): Boolean {
+        return cal1.get(Calendar.YEAR) == cal2.get(Calendar.YEAR) &&
+                cal1.get(Calendar.DAY_OF_YEAR) == cal2.get(Calendar.DAY_OF_YEAR)
+    }
+
+    override fun getItemCount() = chatList.size
+}

@@ -1,0 +1,17 @@
+package com.ayan.instantmessenger
+
+data class Message(
+    val messageId: String = "",
+    val senderId: String = "",
+    val text: String = "",
+    val imageUrl: String = "",
+    val type: String = "text",
+    val timestamp: Long = 0L,
+    val isRead: Boolean = false,
+    val status: String = "sent",
+
+    val encKeyForSender: String = "",
+    val encKeyForRecipient: String = "",
+    val encIv: String = "",
+    val encCiphertext: String = ""
+)

@@ -1,0 +1,153 @@
+package com.ayan.instantmessenger
+
+import android.content.Intent
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.widget.ImageView
+import android.widget.TextView
+import androidx.recyclerview.widget.RecyclerView
+import com.bumptech.glide.Glide
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+class MessageAdapter(
+    private val messageList: List<Message>,
+    private val currentUserId: String
+) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+
+    companion object {
+        const val VIEW_TYPE_SENT_TEXT = 1
+        const val VIEW_TYPE_RECEIVED_TEXT = 2
+        const val VIEW_TYPE_SENT_IMAGE = 3
+        const val VIEW_TYPE_RECEIVED_IMAGE = 4
+    }
+
+    class SentTextViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
+        val tvMessage: TextView = itemView.findViewById(R.id.tvMessage)
+        val tvTimestamp: TextView = itemView.findViewById(R.id.tvTimestamp)
+        val tvTickPending: TextView = itemView.findViewById(R.id.tvTickPending)
+        val tvTickSent: TextView = itemView.findViewById(R.id.tvTickSent)
+        val tvTickDelivered: TextView = itemView.findViewById(R.id.tvTickDelivered)
+        val tvTickRead: TextView = itemView.findViewById(R.id.tvTickRead)
+    }
+
+    class ReceivedTextViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
+        val tvMessage: TextView = itemView.findViewById(R.id.tvMessage)
+        val tvTimestamp: TextView = itemView.findViewById(R.id.tvTimestamp)
+    }
+
+    class SentImageViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
+        val ivImage: ImageView = itemView.findViewById(R.id.ivSentImage)
+        val tvTimestamp: TextView = itemView.findViewById(R.id.tvTimestamp)
+        val tvTickPending: TextView = itemView.findViewById(R.id.tvTickPending)
+        val tvTickSent: TextView = itemView.findViewById(R.id.tvTickSent)
+        val tvTickDelivered: TextView = itemView.findViewById(R.id.tvTickDelivered)
+        val tvTickRead: TextView = itemView.findViewById(R.id.tvTickRead)
+    }
+
+    class ReceivedImageViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
+        val ivImage: ImageView = itemView.findViewById(R.id.ivReceivedImage)
+        val tvTimestamp: TextView = itemView.findViewById(R.id.tvTimestamp)
+    }
+
+    override fun getItemViewType(position: Int): Int {
+        val message = messageList[position]
+        val isSent = message.senderId == currentUserId
+        return if (message.type == "image") {
+            if (isSent) VIEW_TYPE_SENT_IMAGE else VIEW_TYPE_RECEIVED_IMAGE
+        } else {
+            if (isSent) VIEW_TYPE_SENT_TEXT else VIEW_TYPE_RECEIVED_TEXT
+        }
+    }
+
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
+        return when (viewType) {
+            VIEW_TYPE_SENT_TEXT -> SentTextViewHolder(
+                LayoutInflater.from(parent.context)
+                    .inflate(R.layout.item_message_sent, parent, false)
+            )
+            VIEW_TYPE_RECEIVED_TEXT -> ReceivedTextViewHolder(
+                LayoutInflater.from(parent.context)
+                    .inflate(R.layout.item_message_received, parent, false)
+            )
+            VIEW_TYPE_SENT_IMAGE -> SentImageViewHolder(
+                LayoutInflater.from(parent.context)
+                    .inflate(R.layout.item_image_sent, parent, false)
+            )
+            else -> ReceivedImageViewHolder(
+                LayoutInflater.from(parent.context)
+                    .inflate(R.layout.item_image_received, parent, false)
+            )
+        }
+    }
+
+    override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
+        val message = messageList[position]
+        val timeStr = SimpleDateFormat("hh:mm a", Locale.getDefault())
+            .format(Date(message.timestamp))
+
+        when (holder) {
+            is SentTextViewHolder -> {
+                holder.tvMessage.text = message.text
+                holder.tvTimestamp.text = timeStr
+                showTick(
+                    holder.tvTickPending, holder.tvTickSent,
+                    holder.tvTickDelivered, holder.tvTickRead, message.status
+                )
+            }
+            is ReceivedTextViewHolder -> {
+                holder.tvMessage.text = message.text
+                holder.tvTimestamp.text = timeStr
+            }
+            is SentImageViewHolder -> {
+                holder.tvTimestamp.text = timeStr
+                Glide.with(holder.ivImage.context)
+                    .load(message.imageUrl)
+                    .placeholder(android.R.drawable.ic_menu_gallery)
+                    .into(holder.ivImage)
+                showTick(
+                    holder.tvTickPending, holder.tvTickSent,
+                    holder.tvTickDelivered, holder.tvTickRead, message.status
+                )
+                holder.ivImage.setOnClickListener {
+                    val intent = Intent(holder.ivImage.context, ImageViewerActivity::class.java)
+                    intent.putExtra("imageUrl", message.imageUrl)
+                    holder.ivImage.context.startActivity(intent)
+                }
+            }
+            is ReceivedImageViewHolder -> {
+                holder.tvTimestamp.text = timeStr
+                Glide.with(holder.ivImage.context)
+                    .load(message.imageUrl)
+                    .placeholder(android.R.drawable.ic_menu_gallery)
+                    .into(holder.ivImage)
+                holder.ivImage.setOnClickListener {
+                    val intent = Intent(holder.ivImage.context, ImageViewerActivity::class.java)
+                    intent.putExtra("imageUrl", message.imageUrl)
+                    holder.ivImage.context.startActivity(intent)
+                }
+            }
+        }
+    }
+
+    private fun showTick(
+        tvPending: TextView, tvSent: TextView,
+        tvDelivered: TextView, tvRead: TextView, status: String
+    ) {
+        tvPending.visibility = View.GONE
+        tvSent.visibility = View.GONE
+        tvDelivered.visibility = View.GONE
+        tvRead.visibility = View.GONE
+        when (status) {
+            "pending" -> tvPending.visibility = View.VISIBLE
+            "sent" -> tvSent.visibility = View.VISIBLE
+            "delivered" -> tvDelivered.visibility = View.VISIBLE
+            "read" -> tvRead.visibility = View.VISIBLE
+            else -> tvPending.visibility = View.VISIBLE
+        }
+    }
+
+    override fun getItemCount() = messageList.size
+}

@@ -1,0 +1,215 @@
+package com.ayan.instantmessenger
+
+import android.content.Intent
+import android.os.Bundle
+import android.text.Editable
+import android.text.TextWatcher
+import android.view.View
+import android.widget.EditText
+import android.widget.ImageButton
+import androidx.appcompat.app.AppCompatActivity
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.ListenerRegistration
+
+class SearchActivity : AppCompatActivity() {
+
+    private lateinit var db: FirebaseFirestore
+    private lateinit var auth: FirebaseAuth
+    private lateinit var currentUserId: String
+
+    private lateinit var recyclerChats: RecyclerView
+    private lateinit var chatAdapter: ChatAdapter
+    private val chatList = mutableListOf<Chat>()
+
+    private lateinit var recyclerSearch: RecyclerView
+    private lateinit var userAdapter: UserAdapter
+    private val userList = mutableListOf<User>()
+
+    private var chatsListener: ListenerRegistration? = null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_search)
+
+        db = FirebaseFirestore.getInstance()
+        auth = FirebaseAuth.getInstance()
+        currentUserId = auth.currentUser!!.uid
+
+        // Handle notification tap when app is on home screen
+        val notifUserId = intent.getStringExtra("userId")
+        val notifUserName = intent.getStringExtra("userName")
+        if (!notifUserId.isNullOrEmpty()) {
+            val chatIntent = Intent(this, ChatActivity::class.java)
+            chatIntent.putExtra("userId", notifUserId)
+            chatIntent.putExtra("userName", notifUserName)
+            startActivity(chatIntent)
+        }
+
+        val etSearch = findViewById<EditText>(R.id.etSearch)
+        val btnLogout = findViewById<ImageButton>(R.id.btnLogout)
+
+        recyclerChats = findViewById(R.id.recyclerChats)
+        recyclerChats.layoutManager = LinearLayoutManager(this)
+        chatAdapter = ChatAdapter(chatList) { chat ->
+            val intent = Intent(this, ChatActivity::class.java)
+            intent.putExtra("userId", chat.otherUserId)
+            intent.putExtra("userName", chat.otherUserName)
+            startActivity(intent)
+        }
+        recyclerChats.adapter = chatAdapter
+
+        recyclerSearch = findViewById(R.id.recyclerView)
+        recyclerSearch.layoutManager = LinearLayoutManager(this)
+        userAdapter = UserAdapter(userList) { user ->
+            val intent = Intent(this, ChatActivity::class.java)
+            intent.putExtra("userId", user.uid)
+            intent.putExtra("userName", user.name)
+            startActivity(intent)
+        }
+        recyclerSearch.adapter = userAdapter
+
+        etSearch.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                val query = s.toString().trim()
+                if (query.isEmpty()) {
+                    recyclerSearch.visibility = View.GONE
+                    recyclerChats.visibility = View.VISIBLE
+                } else {
+                    recyclerSearch.visibility = View.VISIBLE
+                    recyclerChats.visibility = View.GONE
+                    searchUsers(query)
+                }
+            }
+            override fun afterTextChanged(s: Editable?) {}
+        })
+
+        btnLogout.setOnClickListener {
+            auth.signOut()
+            startActivity(Intent(this, LoginActivity::class.java))
+            finish()
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        startListeningToChats()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        stopListeningToChats()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        stopListeningToChats()
+    }
+
+    private fun startListeningToChats() {
+        stopListeningToChats()
+        chatsListener = db.collection("chats")
+            .whereArrayContains("members", currentUserId)
+            .orderBy("lastMessageTime", com.google.firebase.firestore.Query.Direction.DESCENDING)
+            .addSnapshotListener { snapshots, e ->
+                if (e != null || snapshots == null) return@addSnapshotListener
+
+                val docs = snapshots.documents
+                if (docs.isEmpty()) {
+                    chatList.clear()
+                    chatAdapter.notifyDataSetChanged()
+                    return@addSnapshotListener
+                }
+
+                var validDocs = 0
+                for (doc in docs) {
+                    if (doc.getString("user1") != null && doc.getString("user2") != null) {
+                        validDocs++
+                    }
+                }
+                android.util.Log.d("CHATLIST", "Total docs: ${docs.size}, validDocs: $validDocs")
+
+                if (validDocs == 0) {
+                    chatList.clear()
+                    chatAdapter.notifyDataSetChanged()
+                    return@addSnapshotListener
+                }
+
+                val tempList = mutableListOf<Chat>()
+                var loadedCount = 0
+
+                for (doc in docs) {
+                    val user1 = doc.getString("user1") ?: continue
+                    val user2 = doc.getString("user2") ?: continue
+                    val otherUserId = if (user1 == currentUserId) user2 else user1
+                    val lastMessage = doc.getString("lastMessage") ?: ""
+                    val lastMessageTime = doc.getLong("lastMessageTime") ?: 0L
+                    val unreadCount = when (val raw = doc.get("unreadCount_$currentUserId")) {
+                        is Long -> raw.toInt()
+                        is Int -> raw
+                        is Double -> raw.toInt()
+                        else -> 0
+                    }
+                    android.util.Log.d(
+                        "UNREAD",
+                        "Chat: ${doc.id}, unreadCount_$currentUserId = ${doc.get("unreadCount_$currentUserId")}, parsed = $unreadCount"
+                    )
+
+
+
+                    db.collection("users").document(otherUserId).get()
+                        .addOnSuccessListener { userDoc ->
+                            val name = userDoc.getString("name") ?: "Unknown"
+                            tempList.add(
+                                Chat(
+                                    chatId = doc.id,
+                                    otherUserId = otherUserId,
+                                    otherUserName = name,
+                                    lastMessage = lastMessage,
+                                    lastMessageTime = lastMessageTime,
+                                    unreadCount = unreadCount
+                                )
+                            )
+                            loadedCount++
+                            android.util.Log.d("CHATLIST", "loadedCount: $loadedCount, validDocs: $validDocs")
+                            if (loadedCount == validDocs) {
+                                chatList.clear()
+                                chatList.addAll(
+                                    tempList.sortedByDescending { it.lastMessageTime }
+                                )
+                                android.util.Log.d(
+                                    "CHATLIST",
+                                    "Updating adapter with ${chatList.size} chats, unread: ${chatList.map { it.unreadCount }}"
+                                )
+                                android.util.Log.d("CHATLIST", "Updating adapter with ${chatList.size} chats, unread: ${chatList.map { it.unreadCount }}")
+                                chatAdapter.notifyDataSetChanged()
+                            }
+                        }
+                }
+            }
+    }
+
+    private fun stopListeningToChats() {
+        chatsListener?.remove()
+        chatsListener = null
+    }
+
+    private fun searchUsers(query: String) {
+        db.collection("users")
+            .whereEqualTo("email", query)
+            .get()
+            .addOnSuccessListener { result ->
+                userList.clear()
+                for (doc in result) {
+                    val user = doc.toObject(User::class.java)
+                    if (user.uid != currentUserId) {
+                        userList.add(user)
+                    }
+                }
+                userAdapter.notifyDataSetChanged()
+            }
+    }
+}

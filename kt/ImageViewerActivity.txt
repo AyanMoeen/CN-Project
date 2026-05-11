@@ -1,0 +1,20 @@
+package com.ayan.instantmessenger
+
+import android.os.Bundle
+import androidx.appcompat.app.AppCompatActivity
+import com.bumptech.glide.Glide
+import com.github.chrisbanes.photoview.PhotoView
+
+class ImageViewerActivity : AppCompatActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_image_viewer)
+
+        val imageUrl = intent.getStringExtra("imageUrl") ?: return
+        val photoView = findViewById<PhotoView>(R.id.fullscreenImage)
+        Glide.with(this).load(imageUrl).into(photoView)
+
+        // tap anywhere to go back
+        photoView.setOnClickListener { finish() }
+    }
+}

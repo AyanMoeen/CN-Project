@@ -1,0 +1,51 @@
+package com.ayan.instantmessenger
+
+import android.content.Context
+import android.net.Uri
+import com.cloudinary.android.MediaManager
+import com.cloudinary.android.callback.ErrorInfo
+import com.cloudinary.android.callback.UploadCallback
+
+object CloudinaryHelper {
+
+    private var isInitialized = false
+
+    fun init(context: Context) {
+        if (isInitialized) return
+        val config = mapOf(
+            "cloud_name" to "dwko7ooli",  // replace this
+            "api_key" to "552713879294657",         // replace this
+            "api_secret" to "OP5evzlXK5LR3kwOa6qMKO9MTyw"    // replace this
+        )
+        MediaManager.init(context, config)
+        isInitialized = true
+    }
+
+    fun uploadImage(
+        context: Context,
+        imageUri: Uri,
+        onSuccess: (String) -> Unit,
+        onError: (String) -> Unit,
+        onProgress: () -> Unit
+    ) {
+        init(context)
+        MediaManager.get()
+            .upload(imageUri)
+            .unsigned("instant_messenger") // your upload preset name
+            .callback(object : UploadCallback {
+                override fun onStart(requestId: String) {
+                    onProgress()
+                }
+                override fun onProgress(requestId: String, bytes: Long, totalBytes: Long) {}
+                override fun onSuccess(requestId: String, resultData: Map<*, *>) {
+                    val url = resultData["secure_url"] as String
+                    onSuccess(url)
+                }
+                override fun onError(requestId: String, error: ErrorInfo) {
+                    onError(error.description)
+                }
+                override fun onReschedule(requestId: String, error: ErrorInfo) {}
+            })
+            .dispatch()
+    }
+}

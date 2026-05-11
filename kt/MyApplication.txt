@@ -1,0 +1,87 @@
+package com.ayan.instantmessenger
+
+import android.app.Application
+import android.app.Activity
+import android.os.Bundle
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FirebaseFirestore
+import com.onesignal.OneSignal
+import com.onesignal.debug.LogLevel
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import android.util.Log
+
+class MyApplication : Application() {
+
+    private var activityCount = 0
+
+    override fun onCreate() {
+        super.onCreate()
+
+        val db = FirebaseFirestore.getInstance()
+        val auth = FirebaseAuth.getInstance()
+
+        // Initialize OneSignal
+        OneSignal.Debug.logLevel = LogLevel.VERBOSE
+        OneSignal.initWithContext(this, "b226c7e9-c626-4307-a6d5-a11219cace3b")
+        CoroutineScope(Dispatchers.IO).launch {
+            OneSignal.Notifications.requestPermission(true)
+            kotlinx.coroutines.delay(5000)
+            Log.d(
+                "OneSignalDebug",
+                "Permission: ${OneSignal.Notifications.permission}"
+            )
+            Log.d(
+                "OneSignalDebug",
+                "OptedIn: ${OneSignal.User.pushSubscription.optedIn}"
+            )
+            Log.d(
+                "OneSignalDebug",
+                "Token: ${OneSignal.User.pushSubscription.token}"
+            )
+            Log.d(
+                "OneSignalDebug",
+                "ID: ${OneSignal.User.pushSubscription.id}"
+            )
+            val uid = auth.currentUser?.uid ?: return@launch
+            val oneSignalId = OneSignal.User.pushSubscription.id
+            if (!oneSignalId.isNullOrEmpty()) {
+                db.collection("users").document(uid)
+                    .update("oneSignalId", oneSignalId)
+            }
+        }
+
+        registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
+            override fun onActivityStarted(activity: Activity) {
+                activityCount++
+                if (activityCount == 1) {
+                    setStatus("online", db, auth)
+                }
+            }
+
+            override fun onActivityStopped(activity: Activity) {
+                activityCount--
+                if (activityCount == 0) {
+                    setStatus("offline", db, auth)
+                }
+            }
+
+            override fun onActivityCreated(activity: Activity, bundle: Bundle?) {}
+            override fun onActivityResumed(activity: Activity) {}
+            override fun onActivityPaused(activity: Activity) {}
+            override fun onActivitySaveInstanceState(activity: Activity, bundle: Bundle) {}
+            override fun onActivityDestroyed(activity: Activity) {}
+        })
+    }
+
+    private fun setStatus(status: String, db: FirebaseFirestore, auth: FirebaseAuth) {
+        val uid = auth.currentUser?.uid ?: return
+        val updates = if (status == "offline") {
+            mapOf("status" to "offline", "lastSeen" to System.currentTimeMillis())
+        } else {
+            mapOf("status" to "online")
+        }
+        db.collection("users").document(uid).update(updates)
+    }
+}

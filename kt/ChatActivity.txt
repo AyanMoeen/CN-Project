@@ -1,0 +1,583 @@
+package com.ayan.instantmessenger
+
+import android.app.NotificationManager
+import android.content.Intent
+import android.net.Uri
+import android.os.Bundle
+import android.widget.EditText
+import android.widget.ImageButton
+import android.widget.TextView
+import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AppCompatActivity
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.Query
+import java.net.HttpURLConnection
+import java.net.URL
+
+class ChatActivity : AppCompatActivity() {
+
+    private var myPublicKey: String = ""
+    private var recipientPublicKey: String = ""
+    private var myPrivateKey: String = ""
+    private var lastSoundMessageId = ""
+    private lateinit var db: FirebaseFirestore
+    private lateinit var auth: FirebaseAuth
+    private lateinit var recyclerMessages: RecyclerView
+    private lateinit var adapter: MessageAdapter
+    private val messageList = mutableListOf<Message>()
+
+    private lateinit var currentUserId: String
+    private lateinit var otherUserId: String
+    private lateinit var chatId: String
+    private var currentUserName: String = "Someone"
+    private var isWindowFocused = false
+
+    private val imagePickerLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            val imageUri = result.data?.data
+            if (imageUri != null) {
+                uploadImageAndSend(imageUri)
+            }
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_chat)
+        EncryptionHelper.selfTest(this)
+
+        CloudinaryHelper.init(this)
+
+        db = FirebaseFirestore.getInstance()
+        auth = FirebaseAuth.getInstance()
+
+        currentUserId = auth.currentUser!!.uid
+        otherUserId = intent.getStringExtra("userId") ?: ""
+        val otherUserName = intent.getStringExtra("userName") ?: "User"
+
+        val ids = listOf(currentUserId, otherUserId).sorted()
+        chatId = "${ids[0]}_${ids[1]}"
+
+        db.collection("users").document(currentUserId).get()
+            .addOnSuccessListener { doc ->
+                currentUserName = doc.getString("name") ?: "Someone"
+            }
+
+        val tvChatUserName = findViewById<TextView>(R.id.tvChatUserName)
+        val tvNameInitial = findViewById<TextView>(R.id.tvNameInitial)
+        val tvUserStatus = findViewById<TextView>(R.id.tvUserStatus)
+        tvChatUserName.text = otherUserName
+        tvNameInitial.text = otherUserName.firstOrNull()?.uppercaseChar()?.toString() ?: "?"
+        listenToUserStatus(tvUserStatus)
+
+        recyclerMessages = findViewById(R.id.recyclerMessages)
+        val layoutManager = LinearLayoutManager(this)
+        layoutManager.stackFromEnd = true
+        recyclerMessages.layoutManager = layoutManager
+        adapter = MessageAdapter(messageList, currentUserId)
+        recyclerMessages.adapter = adapter
+
+        val etMessage = findViewById<EditText>(R.id.etMessage)
+        val btnSend = findViewById<ImageButton>(R.id.btnSend)
+        val btnAttach = findViewById<ImageButton>(R.id.btnAttach)
+
+        btnSend.setOnClickListener {
+            val text = etMessage.text.toString().trim()
+            if (text.isEmpty()) return@setOnClickListener
+            sendTextMessage(text)
+            etMessage.setText("")
+        }
+
+        btnAttach.setOnClickListener {
+            val intent = Intent(Intent.ACTION_PICK)
+            intent.type = "image/*"
+            imagePickerLauncher.launch(intent)
+        }
+
+        dismissNotifications()
+        db.collection("users").document(currentUserId)
+            .update("activeChatId", chatId)
+        // REPLACE WITH:
+        syncEncryptionKeys {
+            loadEncryptionKeys {
+                dismissNotifications()
+                listenForMessages()
+            }
+        }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        isWindowFocused = hasFocus
+        if (hasFocus) {
+            markMessagesAsRead()
+            dismissNotifications()
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        db.collection("users").document(currentUserId)
+            .update("activeChatId", "")
+    }
+
+    private fun dismissNotifications() {
+        val notificationManager = getSystemService(NOTIFICATION_SERVICE)
+                as NotificationManager
+        notificationManager.cancelAll()
+    }
+
+    private fun uploadImageAndSend(imageUri: Uri) {
+        Toast.makeText(this, "Uploading image...", Toast.LENGTH_SHORT).show()
+        CloudinaryHelper.uploadImage(
+            context = this,
+            imageUri = imageUri,
+            onSuccess = { imageUrl -> sendImageMessage(imageUrl) },
+            onError = { error ->
+                Toast.makeText(this, "Upload failed: $error", Toast.LENGTH_SHORT).show()
+            },
+            onProgress = {
+                Toast.makeText(this, "Uploading...", Toast.LENGTH_SHORT).show()
+            }
+        )
+    }
+
+    private fun sendImageMessage(imageUrl: String) {
+        val messageRef = db.collection("chats")
+            .document(chatId)
+            .collection("messages")
+            .document()
+
+        val message = hashMapOf(
+            "messageId" to messageRef.id,
+            "senderId" to currentUserId,
+            "text" to "",
+            "imageUrl" to imageUrl,
+            "type" to "image",
+            "timestamp" to System.currentTimeMillis(),
+            "isRead" to false,
+            "status" to "sent"
+        )
+
+        messageRef.set(message)
+            .addOnSuccessListener {
+                messageRef.update("status", "delivered")
+                updateLastMessage("📷 Photo", "image")
+                sendNotificationToUser(otherUserId, "📷 Photo")
+            }
+            .addOnFailureListener { e ->
+                Toast.makeText(this, "Failed: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+    }
+
+    private fun sendTextMessage(text: String) {
+        val messageRef = db.collection("chats")
+            .document(chatId)
+            .collection("messages")
+            .document()
+
+        val isOnline = NetworkUtils.isOnline(this)
+
+        // REPLACE with:
+        val payload = if (recipientPublicKey.isNotEmpty() && myPublicKey.isNotEmpty()) {
+            EncryptionHelper.encryptMessageForBoth(text, recipientPublicKey, myPublicKey)
+        } else null
+        android.util.Log.d("SLOT", "recipientPublicKey last 20: ${recipientPublicKey.takeLast(20)}")
+        android.util.Log.d("SLOT", "myPublicKey last 20: ${myPublicKey.takeLast(20)}")
+
+        android.util.Log.d("KEY_MATCH", "recipientPublicKey last 20: ${recipientPublicKey.takeLast(20)}")
+        android.util.Log.d("KEY_MATCH", "encKeyForRecipient last 20: ${payload?.encKeyForRecipient?.takeLast(20)}")
+
+        val message = hashMapOf(
+            "messageId" to messageRef.id,
+            "senderId" to currentUserId,
+            "text" to "",
+            "imageUrl" to "",
+            "type" to "text",
+            "timestamp" to System.currentTimeMillis(),
+            "isRead" to false,
+            "status" to if (isOnline) "sent" else "pending",
+            "encKeyForSender" to (payload?.encKeyForSender ?: ""),
+            "encKeyForRecipient" to (payload?.encKeyForRecipient ?: ""),
+            "encIv" to (payload?.iv ?: ""),
+            "encCiphertext" to (payload?.ciphertext ?: "")
+        )
+
+        val localMessage = Message(
+            messageId = messageRef.id,
+            senderId = currentUserId,
+            text = text,
+            type = "text",
+            timestamp = System.currentTimeMillis(),
+            isRead = false,
+            status = if (isOnline) "sent" else "pending"
+        )
+        messageList.add(localMessage)
+        adapter.notifyItemInserted(messageList.size - 1)
+        recyclerMessages.scrollToPosition(messageList.size - 1)
+
+        messageRef.set(message)
+            .addOnSuccessListener {
+                messageRef.update("status", "delivered")
+                updateLastMessage(text, "text")
+                sendNotificationToUser(otherUserId, text)
+            }
+            .addOnFailureListener {
+                Toast.makeText(this, "Failed to send", Toast.LENGTH_SHORT).show()
+            }
+    }
+
+    private fun markMessagesAsRead() {
+        // Reset unread count for current user
+        db.collection("chats").document(chatId)
+            .update("unreadCount_$currentUserId", 0)
+
+        db.collection("chats")
+            .document(chatId)
+            .collection("messages")
+            .whereEqualTo("senderId", otherUserId)
+            .whereEqualTo("isRead", false)
+            .get()
+            .addOnSuccessListener { documents ->
+                for (doc in documents) {
+                    doc.reference.update(mapOf("isRead" to true, "status" to "read"))
+                }
+            }
+    }
+
+    private fun updateLastMessage(text: String, type: String) {
+        val chatRef = db.collection("chats").document(chatId)
+        val lastMessageText = if (type == "image") "📷 Photo" else text
+
+        chatRef.get().addOnSuccessListener { doc ->
+            if (doc.exists()) {
+                chatRef.update(
+                    "lastMessage", lastMessageText,
+                    "lastMessageTime", System.currentTimeMillis(),
+                    "lastMessageSenderId", currentUserId,
+                    "unreadCount_$otherUserId",
+                    com.google.firebase.firestore.FieldValue.increment(1)
+                )
+            } else {
+                val data = HashMap<String, Any>()
+                data["lastMessage"] = lastMessageText
+                data["lastMessageTime"] = System.currentTimeMillis()
+                data["lastMessageSenderId"] = currentUserId
+                data["user1"] = currentUserId
+                data["user2"] = otherUserId
+                data["members"] = listOf(currentUserId, otherUserId)
+                data["unreadCount_$otherUserId"] = 1
+                data["unreadCount_$currentUserId"] = 0
+                chatRef.set(data)
+            }
+        }
+    }
+
+    private fun listenForMessages() {
+        db.collection("chats")
+            .document(chatId)
+            .collection("messages")
+            .orderBy("timestamp", Query.Direction.ASCENDING)
+            .addSnapshotListener { snapshots, e ->
+                if (e != null) return@addSnapshotListener
+                messageList.clear()
+                for (doc in snapshots!!) {
+                    val message = doc.toObject(Message::class.java)
+                    android.util.Log.d("DECRYPT", "text contains pipe: ${message.text.contains("|")}")
+                    android.util.Log.d("DECRYPT", "parts by pipe: ${message.text.split("|", limit=3).size}")
+                    android.util.Log.d("DECRYPT", "senderId: ${message.senderId}, currentUserId: $currentUserId")
+                    android.util.Log.d("DECRYPT", "text parts count: ${message.text.split(":").size}")
+                    android.util.Log.d("DECRYPT", "myPrivateKey empty: ${myPrivateKey.isEmpty()}")
+                    // REPLACE:
+                    val freshPrivateKey = if (myPrivateKey.isNotEmpty()) myPrivateKey else KeyStorageHelper.getPrivateKey(this) ?: ""
+                    val displayMessage = if (message.type == "text"
+                        && freshPrivateKey.isNotEmpty()
+                        && message.encCiphertext.isNotEmpty()
+                    ) {
+                        val payload = if (message.senderId == currentUserId) {
+                            // I sent this message — use sender slot first
+                            EncryptedPayload(
+                                encKeyForSender = message.encKeyForSender,
+                                encKeyForRecipient = message.encKeyForRecipient,
+                                iv = message.encIv,
+                                ciphertext = message.encCiphertext
+                            )
+                        } else {
+                            // I received this message — swap slots so recipient slot is tried first
+                            EncryptedPayload(
+                                encKeyForSender = message.encKeyForRecipient,
+                                encKeyForRecipient = message.encKeyForSender,
+                                iv = message.encIv,
+                                ciphertext = message.encCiphertext
+                            )
+                        }
+                        val decrypted = EncryptionHelper.decryptMessage(payload, freshPrivateKey)
+                        message.copy(text = decrypted)
+                    } else {
+                        message
+                    }
+                    messageList.add(displayMessage)
+                }
+                adapter.notifyDataSetChanged()
+                if (messageList.isNotEmpty()) {
+                    recyclerMessages.scrollToPosition(messageList.size - 1)
+
+                    // Update last message from receiver side
+                    val lastMessage = messageList.last()
+                    if (lastMessage.senderId != currentUserId) {
+                        val chatRef = db.collection("chats").document(chatId)
+                        val lastMessageText = if (lastMessage.type == "image")
+                            "📷 Photo" else lastMessage.text
+                        chatRef.get().addOnSuccessListener { doc ->
+                            val savedTime = doc.getLong("lastMessageTime") ?: 0L
+                            if (lastMessage.timestamp > savedTime) {
+                                chatRef.update(
+                                    "lastMessage", lastMessageText,
+                                    "lastMessageTime", lastMessage.timestamp,
+                                    "lastMessageSenderId", lastMessage.senderId
+                                )
+                            }
+                        }
+                    }
+                }
+                // Only mark as read if window is focused
+                if (isWindowFocused) {
+                    val lastMessage = messageList.lastOrNull()
+                    if (lastMessage?.senderId != currentUserId &&
+                        lastMessage?.messageId != lastSoundMessageId) {
+                        lastSoundMessageId = lastMessage?.messageId ?: ""
+                        playMessageSound()
+                    }
+                    markMessagesAsRead()
+                }
+            }
+    }
+
+    private fun listenToUserStatus(tvUserStatus: TextView) {
+        db.collection("users").document(otherUserId)
+            .addSnapshotListener { snapshot, e ->
+                if (e != null || snapshot == null) return@addSnapshotListener
+                val status = snapshot.getString("status") ?: "offline"
+                if (status == "online") {
+                    tvUserStatus.text = "online"
+                    tvUserStatus.setTextColor(android.graphics.Color.parseColor("#CCFFFFFF"))
+                } else {
+                    val lastSeen = snapshot.getLong("lastSeen")
+                    if (lastSeen != null) {
+                        val timeStr = java.text.SimpleDateFormat(
+                            "hh:mm a", java.util.Locale.getDefault()
+                        ).format(java.util.Date(lastSeen))
+                        tvUserStatus.text = "last seen at $timeStr"
+                    } else {
+                        tvUserStatus.text = "offline"
+                    }
+                    tvUserStatus.setTextColor(android.graphics.Color.parseColor("#AAFFFFFF"))
+                }
+            }
+    }
+
+    private fun sendNotificationToUser(recipientUid: String, messageText: String) {
+        db.collection("users").document(recipientUid).get()
+            .addOnSuccessListener { doc ->
+                val activeChatId = doc.getString("activeChatId") ?: ""
+                if (activeChatId == chatId) return@addOnSuccessListener
+
+                val fcmToken = doc.getString("fcmToken") ?: return@addOnSuccessListener
+                if (fcmToken.isEmpty()) return@addOnSuccessListener
+                val senderName = currentUserName
+                Thread {
+                    try {
+                        sendFcmV1Notification(fcmToken, senderName, messageText)
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }.start()
+            }
+    }
+
+    private fun sendFcmV1Notification(
+        fcmToken: String,
+        senderName: String,
+        messageText: String
+    ) {
+        val privateKeyPem = "MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC5+YYAXgCd2Ek3" +
+                "0njW8bbM3OB90yLjM939zahCGTXogASUkEUTsRT0uI/ef/ug9UAyCbTDzn1Me4nH" +
+                "eVaDg5KLlP8V3K3zJGnsx9T7W914mlUio01t+SscNMdOIVFYl02NbP6SOgRkqTrc" +
+                "DTBA+2DfbIqVBxn/xkGJpfKFvNSJuKbL/X9trNEHkrXCi89FO0jLAPvcGsycrX//" +
+                "eYk6OCBQQpI6kwgjzEZfN3AR99XyqIDxv5VWGgW8TtdVoEyclg9U0dVne4FEC4jh" +
+                "8rvDdfq8yp3Kk5xMUUYEDBs+21tKCikQLColrxDX9qoEEUyrBOobK4PnEZFSV3fc" +
+                "GXD2hc9HAgMBAAECggEACL7tSFMjYEjtmIxzVlhjqlqwy/oD5/9mbysewI0C9f4f" +
+                "OQVX2kc3nxKW4XXPVZBzBmdictrhFZmxrwnLwb+MQrgtDtAj9g0+Vf5Hy9JUJfnM" +
+                "Cyb22zceieMJhGkYtDvZT89SYXoM/tbeh76vCD9KHPezxLJizJ58Mob1UsjAjgFm" +
+                "VqQCI+iJa5kzWE6WZnQHWzG4SRjWzs7aJN0A2kNOOaQUWU2Jh6tFtZMg4IuWKVuM" +
+                "xg4Ox0ZRbThLjfCv8RW+QiNOoxHVTRfKhezqxVbqPP+aH6mEN9QvXWNVmy1yGDck" +
+                "8DMdBF1Y50uzukchFJETRoV+EvpoEA4XZC2SzD7LwQKBgQD3sPneNUI++/B6H+gB" +
+                "j3ipu59Rdd11XmFftDbZgoJAi1wOj8LlQFSMGoIS2dpc6KerBWtzioCinnyHYB8U" +
+                "Ziv1b2Hl7499u6nQB47TJ2U/qrnOaDSelSqZlM/1Q80LWoTabRE/YTDJTM7lBBUw" +
+                "DnNlPAsNrFH6/T4hWp0HwJTWkQKBgQDANo/w97yxRBCg2M1xQe9TNIEbTBB+pP3N" +
+                "QTKYhVx1NC3zBdwHNiG53aQMrNz1DoM7yok5G780o737DJOA1BgW6nUFXaKOK8JF" +
+                "6uIbQbgN+X4HGPkqdSplM7Qsv9PleiIIwKvYCedU8kTsNRLsoGBb3zqpBmD5oypU" +
+                "KFzEGLykVwKBgQDnouk6BqKqVmCBRV9qPitAyIbo3oo53gbAQr/c0DFRfUKdF5LT" +
+                "ZELtN0kXqgaNRsKurIXdatR7wC2DSMAoCpjnkb+DEnMlyZ+4PakzDS+hx962CjvT" +
+                "ZnqNYF7O5xZVnNSLlN5BYHoIdz0xbY0HASynquxHYDTWvYgiFyStgEtxEQKBgQCD" +
+                "T8MeN+CsqXdCq1oOmaDKEwBwiZJrMoRBCN1r3Q/A8hjCAarDMnPv6j78ecupjnSR" +
+                "EFiWryH88DAFph3O0RZz8VBojgNTZQmfgktdm5QF2AAFEUaHfuurn5rjR1mXV8yQ" +
+                "di/vszRaj/gN9mQrS5UIroQAnN77LEDqpXhabxvQmQKBgBwgzLT+pHumLvUjsifl" +
+                "Pf2i+IpJAyvEVniJNHmmHF9mCKV+a3yafxAh8Wb219x3bDqGGqt/gKIuOhpk1MlP" +
+                "uS6jm6Zsf0msxIsXf9Uhp2yseAExtTXbe/+rZv+Gt4tR8QN187Dkj8XiBHM/Joii" +
+                "EYu1chaoE75aoGYz8AhEAg1O"
+
+        val keyBytes = android.util.Base64.decode(privateKeyPem, android.util.Base64.DEFAULT)
+        val keySpec = java.security.spec.PKCS8EncodedKeySpec(keyBytes)
+        val privateKey = java.security.KeyFactory.getInstance("RSA").generatePrivate(keySpec)
+
+        val now = System.currentTimeMillis() / 1000
+        val jwt = io.jsonwebtoken.Jwts.builder()
+            .setIssuer("firebase-adminsdk-fbsvc@instantmessenger-d9a8a.iam.gserviceaccount.com")
+            .setSubject("firebase-adminsdk-fbsvc@instantmessenger-d9a8a.iam.gserviceaccount.com")
+            .setAudience("https://oauth2.googleapis.com/token")
+            .claim("scope", "https://www.googleapis.com/auth/firebase.messaging")
+            .setIssuedAt(java.util.Date(now * 1000))
+            .setExpiration(java.util.Date((now + 3600) * 1000))
+            .signWith(privateKey, io.jsonwebtoken.SignatureAlgorithm.RS256)
+            .compact()
+
+        val tokenUrl = URL("https://oauth2.googleapis.com/token")
+        val tokenConn = tokenUrl.openConnection() as HttpURLConnection
+        tokenConn.requestMethod = "POST"
+        tokenConn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+        tokenConn.doOutput = true
+        val tokenBody =
+            "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=$jwt"
+        tokenConn.outputStream.write(tokenBody.toByteArray())
+        val tokenResponse = tokenConn.inputStream.bufferedReader().readText()
+        tokenConn.disconnect()
+
+        val accessToken = org.json.JSONObject(tokenResponse).getString("access_token")
+
+        val fcmUrl =
+            URL("https://fcm.googleapis.com/v1/projects/instantmessenger-d9a8a/messages:send")
+        val fcmConn = fcmUrl.openConnection() as HttpURLConnection
+        fcmConn.requestMethod = "POST"
+        fcmConn.setRequestProperty("Content-Type", "application/json")
+        fcmConn.setRequestProperty("Authorization", "Bearer $accessToken")
+        fcmConn.doOutput = true
+
+        val body = org.json.JSONObject().apply {
+            put("message", org.json.JSONObject().apply {
+                put("token", fcmToken)
+                put("notification", org.json.JSONObject().apply {
+                    put("title", senderName)
+                    put("body", messageText)
+                })
+                put("data", org.json.JSONObject().apply {
+                    put("userId", currentUserId)
+                    put("userName", senderName)
+                })
+            })
+        }
+
+        fcmConn.outputStream.write(body.toString().toByteArray())
+        val responseCode = fcmConn.responseCode
+        android.util.Log.d("FCM", "Notification response: $responseCode")
+        fcmConn.disconnect()
+    }
+
+    private fun playMessageSound() {
+        val mediaPlayer = android.media.MediaPlayer.create(this, R.raw.message_received)
+        mediaPlayer.setAudioAttributes(
+            android.media.AudioAttributes.Builder()
+                .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                .setContentType(android.media.AudioAttributes.CONTENT_TYPE_MUSIC)
+                .build()
+        )
+        mediaPlayer.setOnCompletionListener { it.release() }
+        mediaPlayer.start()
+    }
+
+    private fun syncEncryptionKeys(onDone: () -> Unit) {
+        val storedPrivateKey = KeyStorageHelper.getPrivateKey(this) ?: ""
+
+        db.collection("users").document(currentUserId).get()
+            .addOnSuccessListener { doc ->
+                val firestorePublicKey = doc.getString("publicKey") ?: ""
+
+                val keysAreValid = if (storedPrivateKey.isNotEmpty() && firestorePublicKey.isNotEmpty()) {
+                    try {
+                        val privateKeyBytes = android.util.Base64.decode(storedPrivateKey, android.util.Base64.NO_WRAP)
+                        val privateKey = java.security.KeyFactory.getInstance("RSA")
+                            .generatePrivate(java.security.spec.PKCS8EncodedKeySpec(privateKeyBytes))
+                        val crtKey = privateKey as java.security.interfaces.RSAPrivateCrtKey
+                        val spec = java.security.spec.RSAPublicKeySpec(crtKey.modulus, crtKey.publicExponent)
+                        val derivedPublicKey = java.security.KeyFactory.getInstance("RSA").generatePublic(spec)
+                        val derivedStr = android.util.Base64.encodeToString(
+                            derivedPublicKey.encoded, android.util.Base64.NO_WRAP
+                        )
+                        val match = derivedStr == firestorePublicKey
+                        android.util.Log.d("KEYS", "Keys MATCH: $match")
+                        android.util.Log.d("KEYS", "Firestore pubkey last 20: ${firestorePublicKey.takeLast(20)}")
+                        android.util.Log.d("KEYS", "Derived pubkey  last 20: ${derivedStr.takeLast(20)}")
+                        match
+                    } catch (e: Exception) {
+                        android.util.Log.e("KEYS", "Key comparison error: ${e.message}")
+                        false
+                    }
+                } else {
+                    android.util.Log.e("KEYS", "storedPrivateKey empty: ${storedPrivateKey.isEmpty()}, firestorePublicKey empty: ${firestorePublicKey.isEmpty()}")
+                    false
+                }
+
+                if (!keysAreValid) {
+                    android.util.Log.w("KEYS", "Mismatch — regenerating key pair")
+                    val (newPublicKey, newPrivateKey) = EncryptionHelper.generateKeyPair()
+                    KeyStorageHelper.savePrivateKey(this, newPrivateKey)
+                    myPrivateKey = newPrivateKey  // ← SET IT NOW, don't wait for loadEncryptionKeys
+                    db.collection("users").document(currentUserId)
+                        .update("publicKey", newPublicKey)
+                        .addOnSuccessListener {
+                            android.util.Log.d("KEYS", "New key pair saved to Firestore")
+                            onDone()
+                        }
+                        .addOnFailureListener { e ->
+                            android.util.Log.e("KEYS", "Failed to save new public key: ${e.message}")
+                            onDone()
+                        }
+                } else {
+                    android.util.Log.d("KEYS", "Keys valid — no regeneration needed")
+                    onDone()  // ← proceed immediately
+                }
+            }
+            .addOnFailureListener { e ->
+                android.util.Log.e("KEYS", "Firestore fetch failed: ${e.message}")
+                onDone()
+            }
+    }
+
+    private fun loadEncryptionKeys(onReady: () -> Unit) {
+        if (myPrivateKey.isEmpty()) {
+            myPrivateKey = KeyStorageHelper.getPrivateKey(this) ?: ""
+        }
+
+        db.collection("users").document(currentUserId).get()
+            .addOnSuccessListener { myDoc ->
+                myPublicKey = myDoc.getString("publicKey") ?: ""
+
+                db.collection("users").document(otherUserId).get()
+                    .addOnSuccessListener { recipientDoc ->
+                        recipientPublicKey = recipientDoc.getString("publicKey") ?: ""
+                        android.util.Log.d("KEY_LOAD", "myPublicKey last 20: ${myPublicKey.takeLast(20)}")
+                        android.util.Log.d("KEY_LOAD", "recipientPublicKey last 20: ${recipientPublicKey.takeLast(20)}")
+
+                        android.util.Log.d("SLOT", "receiver myPublicKey last 20: ${myPublicKey.takeLast(20)}")
+                        android.util.Log.d("SLOT", "receiver recipientPublicKey last 20: ${recipientPublicKey.takeLast(20)}")
+                        onReady()
+                    }
+            }
+    }
+}

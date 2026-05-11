@@ -1,0 +1,10 @@
+package com.ayan.instantmessenger
+
+data class Chat(
+    val chatId: String = "",
+    val otherUserId: String = "",
+    val otherUserName: String = "",
+    val lastMessage: String = "",
+    val lastMessageTime: Long = 0L,
+    val unreadCount: Int = 0
+)

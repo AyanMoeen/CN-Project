@@ -1,0 +1,9 @@
+package com.ayan.instantmessenger
+
+data class User(
+    val uid: String = "",
+    val name: String = "",
+    val email: String = "",
+    val status: String = "",
+    val publicKey: String = ""
+)
